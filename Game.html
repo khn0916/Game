@@ -2,11 +2,11 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <title>미니게임 - 1단계</title>
+  <title>미니게임 - 2단계 (가시성 및 속도 수정)</title>
   <style>
     body {
       margin: 0;
-      background-color: #222;
+      background-color: #acaaa; /* 네가 설정한 배경색 */
       display: flex;
       justify-content: center;
       align-items: center;
@@ -14,57 +14,67 @@
       color: white;
       font-family: sans-serif;
     }
-    /* 게임이 그려질 도화지(캔버스) */
     #gameCanvas {
-      background-color: #333; /* 어두운 바닥 */
-      border: 2px solid #555;
+      background-color: #555;
+      border: 2px solid #777;
     }
   </style>
 </head>
 <body>
 
-  <!-- 게임 화면(도화지) -->
   <canvas id="gameCanvas" width="800" height="600"></canvas>
 
   <script>
-    // 1. 도화지(Canvas) 준비하기
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
 
-    // 2. 캐릭터 설정
-    // 보스 (중앙 고정)
+    // --- 게임 상태 변수 ---
+    let gameState = 'playing'; 
+    let startTime = Date.now();
+    const GAME_DURATION = 50000; 
+
     const boss = {
       x: canvas.width / 2,
       y: canvas.height / 2,
       size: 50,
-      emoji: '😈'
+      emoji: '😈',
+      radius: 25
     };
 
-    // 유저 (움직이는 캐릭터)
     const player = {
       x: canvas.width / 2,
-      y: canvas.height - 100, // 시작 위치는 아래쪽
+      y: canvas.height - 100,
       size: 40,
+      radius: 20,
       emoji: '🤺',
-      speed: 5 // 이동 속도
+      speed: 30,
+      vx: 0, 
+      vy: 0,
+      bounceX: 0, 
+      bounceY: 0,
+      // 3번 수정: 가속도를 더 높이고 마찰을 줄여서 빠릿하게!
+      acceleration: 2.0, 
+      friction: 0.5,
+      hp: 3,           
+      maxHp: 3,
+      invincible: 0    
     };
 
-    // 3. 키보드 입력 상태 저장
+    let zones = [];
+    let lastZoneTime = 0;
+    const ZONE_SPAWN_INTERVAL = 1000; 
+
     const keys = {
       w: false, a: false, s: false, d: false,
       ArrowUp: false, ArrowLeft: false, ArrowDown: false, ArrowRight: false
     };
 
-    // 키보드 이벤트 리스너
     window.addEventListener('keydown', (e) => {
-      // 화면 스크롤 방지
       if (e.key in keys) e.preventDefault(); 
-      
       if (e.key === 'w' || e.key === 'W') keys.w = true;
       if (e.key === 'a' || e.key === 'A') keys.a = true;
       if (e.key === 's' || e.key === 'S') keys.s = true;
       if (e.key === 'd' || e.key === 'D') keys.d = true;
-      
       if (e.key === 'ArrowUp') keys.ArrowUp = true;
       if (e.key === 'ArrowLeft') keys.ArrowLeft = true;
       if (e.key === 'ArrowDown') keys.ArrowDown = true;
@@ -76,64 +86,187 @@
       if (e.key === 'a' || e.key === 'A') keys.a = false;
       if (e.key === 's' || e.key === 'S') keys.s = false;
       if (e.key === 'd' || e.key === 'D') keys.d = false;
-      
       if (e.key === 'ArrowUp') keys.ArrowUp = false;
       if (e.key === 'ArrowLeft') keys.ArrowLeft = false;
       if (e.key === 'ArrowDown') keys.ArrowDown = false;
       if (e.key === 'ArrowRight') keys.ArrowRight = false;
     });
 
-    // 4. 화면 그리기 (매 프레임마다 실행됨)
     function draw() {
-      // 캔버스 지우기 (이전 그림 삭제)
+      // 1번 수정: 캔버스 전체를 완벽하게 지움
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // 보스 그리기 (이모지로)
+      let elapsed = Date.now() - startTime;
+      let timeLeft = Math.max(0, Math.floor((GAME_DURATION - elapsed) / 1000));
+
+      // 장판 그리기
+      zones.forEach(zone => {
+        if (zone.state === 'warning') {
+          ctx.beginPath();
+          ctx.arc(zone.x, zone.y, zone.radius, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+          ctx.fill();
+          ctx.strokeStyle = 'red';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        } else if (zone.state === 'exploding') {
+          ctx.beginPath();
+          ctx.arc(zone.x, zone.y, zone.radius, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
+          ctx.fill();
+        }
+      });
+
+      // 보스 그리기
       ctx.font = `${boss.size}px serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      // 1번 수정: 보스는 항상 또렷하게 그려줌 (번쩍임 없음)
       ctx.fillText(boss.emoji, boss.x, boss.y);
 
-      // 유저 그리기 (이모지로)
+      // 유저 그리기 (1번 수정: 깜빡일 때 아예 안 그리는 게 아니라 '반투명'하게 그려서 가시성 확보)
+      if (player.invincible > 0 && Math.floor(Date.now() / 100) % 2 === 0) {
+        ctx.globalAlpha = 0.3; // 투명도 30%로 설정
+      } else {
+        ctx.globalAlpha = 1.0; // 원래대로
+      }
       ctx.font = `${player.size}px serif`;
       ctx.fillText(player.emoji, player.x, player.y);
+      ctx.globalAlpha = 1.0; // 다시 원래 투명도로 복구
+
+      // UI
+      ctx.font = '20px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'white';
+      ctx.fillText(`HP: ${'❤️'.repeat(player.hp)}`, 20, 30);
+      ctx.textAlign = 'right';
+      ctx.fillText(`남은 시간: ${timeLeft}초`, canvas.width - 20, 30);
     }
 
-    // 5. 게임 루프 (실시간 업데이트)
     function update() {
-      // 유저 이동 처리
+      if (gameState !== 'playing') return;
+
+      let elapsed = Date.now() - startTime;
+      if (elapsed >= GAME_DURATION) {
+        gameState = 'win';
+        return;
+      }
+
+      let now = Date.now();
+      if (now - lastZoneTime > ZONE_SPAWN_INTERVAL) {
+        lastZoneTime = now;
+        let angle = Math.random() * Math.PI * 2;
+        let distance = 100 + Math.random() * 250; 
+        let zx = boss.x + Math.cos(angle) * distance;
+        let zy = boss.y + Math.sin(angle) * distance;
+        
+        let radius = 60; 
+        zx = Math.max(radius, Math.min(canvas.width - radius, zx));
+        zy = Math.max(radius, Math.min(canvas.height - radius, zy));
+
+        zones.push({
+          x: zx,
+          y: zy,
+          radius: radius,
+          state: 'warning', 
+          timer: 0,
+          warningDuration: 800, 
+          explodeDuration: 300  
+        });
+      }
+
+      zones.forEach((zone, index) => {
+        zone.timer += 16; 
+        if (zone.state === 'warning' && zone.timer > zone.warningDuration) {
+          zone.state = 'exploding';
+          zone.timer = 0;
+          let dx = player.x - zone.x;
+          let dy = player.y - zone.y;
+          let dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < zone.radius + player.radius && player.invincible <= 0) {
+            player.hp -= 1;
+            player.invincible = 1000; 
+            if (player.hp <= 0) gameState = 'lose';
+          }
+        } else if (zone.state === 'exploding' && zone.timer > zone.explodeDuration) {
+          zones.splice(index, 1); 
+        }
+      });
+
+      if (player.invincible > 0) player.invincible -= 16;
+
       let moveX = 0;
       let moveY = 0;
-
-      // WASD 또는 방향키 확인
       if (keys.w || keys.ArrowUp) moveY -= 1;
       if (keys.s || keys.ArrowDown) moveY += 1;
       if (keys.a || keys.ArrowLeft) moveX -= 1;
       if (keys.d || keys.ArrowRight) moveX += 1;
 
-      // 대각선 이동 시 속도가 빨라지지 않도록 정규화
-      if (moveX !== 0 && moveY !== 0) {
-        moveX *= 0.707; // 1 / sqrt(2)
-        moveY *= 0.707;
+      if (moveX !== 0 && moveY !== 0) { moveX *= 0.707; moveY *= 0.707; }
+
+      // 3번 수정: 가속도와 마찰이 적용된 이동
+      player.vx += moveX * player.acceleration;
+      player.vy += moveY * player.acceleration;
+      player.vx *= player.friction;
+      player.vy *= player.friction;
+
+      if (Math.abs(player.vx) < 0.1) player.vx = 0;
+      if (Math.abs(player.vy) < 0.1) player.vy = 0;
+      
+      if (player.vx > player.speed) player.vx = player.speed;
+      if (player.vx < -player.speed) player.vx = -player.speed;
+      if (player.vy > player.speed) player.vy = player.speed;
+      if (player.vy < -player.speed) player.vy = -player.speed;
+
+      player.bounceX *= 0.9;
+      player.bounceY *= 0.9;
+
+      let nextX = player.x + player.vx + player.bounceX;
+      let nextY = player.y + player.vy + player.bounceY;
+
+      let dx = nextX - boss.x;
+      let dy = nextY - boss.y;
+      let dist = Math.sqrt(dx * dx + dy * dy);
+      let minDist = player.radius + boss.radius;
+      if (dist < minDist) {
+        let angle = Math.atan2(dy, dx);
+        nextX = boss.x + Math.cos(angle) * minDist;
+        nextY = boss.y + Math.sin(angle) * minDist;
+        player.bounceX = Math.cos(angle) * 7;
+        player.bounceY = Math.sin(angle) * 7;
+        player.vx *= 0.5;
+        player.vy *= 0.5;
       }
 
-      player.x += moveX * player.speed;
-      player.y += moveY * player.speed;
+      player.x = nextX;
+      player.y = nextY;
 
-      // 화면 밖으로 나가지 않도록 경계 체크
-      if (player.x < player.size / 2) player.x = player.size / 2;
-      if (player.x > canvas.width - player.size / 2) player.x = canvas.width - player.size / 2;
-      if (player.y < player.size / 2) player.y = player.size / 2;
-      if (player.y > canvas.height - player.size / 2) player.y = canvas.height - player.size / 2;
+      if (player.x < player.size / 2) { player.x = player.size / 2; player.vx = 0; player.bounceX = 0; }
+      if (player.x > canvas.width - player.size / 2) { player.x = canvas.width - player.size / 2; player.vx = 0; player.bounceX = 0; }
+      if (player.y < player.size / 2) { player.y = player.size / 2; player.vy = 0; player.bounceY = 0; }
+      if (player.y > canvas.height - player.size / 2) { player.y = canvas.height - player.size / 2; player.vy = 0; player.bounceY = 0; }
 
-      // 다음 프레임 그리기
       draw();
-
-      // 무한 루프
-      requestAnimationFrame(update);
+      
+      if (gameState === 'playing') {
+        requestAnimationFrame(update);
+      } else if (gameState === 'win') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'gold';
+        ctx.font = '50px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('승리! 보스가 과부하되었습니다.', canvas.width / 2, canvas.height / 2);
+      } else if (gameState === 'lose') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'red';
+        ctx.font = '50px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('패배... 체력이 다했습니다.', canvas.width / 2, canvas.height / 2);
+      }
     }
 
-    // 게임 시작!
     update();
   </script>
 </body>
