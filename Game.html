@@ -1,273 +1,510 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="utf-8">
-  <title>미니게임 - 2단계 (가시성 및 속도 수정)</title>
-  <style>
-    body {
-      margin: 0;
-      background-color: #acaaa; /* 네가 설정한 배경색 */
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-      color: white;
-      font-family: sans-serif;
-    }
-    #gameCanvas {
-      background-color: #555;
-      border: 2px solid #777;
-    }
-  </style>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>미니게임 - 19단계 (난이도 선택 및 발악 패턴)</title>
+<style>
+  body { margin: 0; min-height: 100vh; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; background: #222; color: white; font-family: sans-serif; }
+  #bar { display: flex; align-items: center; justify-content: center; gap: 10px; max-width: 100%; }
+  #status { padding: 6px 16px; background: #333; border-radius: 8px; font-size: .95rem; }
+  #pauseBtn { padding: 5px 14px; font-size: .9rem; border-radius: 6px; }
+  #gameCanvas { display: none; width: min(800px, calc(100vw - 32px), calc(var(--canvas-h, 540px) * 4 / 3)); height: auto; background: #555; border: 2px solid #777; }
+  #menu { display: flex; flex-direction: column; gap: 20px; text-align: center; }
+  #menu h1 { font-size: 3rem; margin: .67em 0 10px; }
+  #menu p { margin: 1em 0 20px; }
+  #help { max-width: 800px; box-sizing: border-box; font-size: .85rem; line-height: 1.6; color: #ccc; text-align: center; }
+  #help p { margin: 2px 0; }
+  kbd { padding: 1px 6px; border: 1px solid #888; border-radius: 4px; background: #333; font-family: inherit; }
+  button { padding: 15px 30px; font-size: 1.2rem; font-weight: bold; cursor: pointer; background: #fff; border: 2px solid #333; border-radius: 8px; transition: background-color .2s; }
+  button:hover { background: #ddd; }
+  .hard-btn { border-color: #E1002A; color: #E1002A; }
+</style>
 </head>
 <body>
+<div id="bar"><div id="status" aria-live="polite"></div><button id="pauseBtn">일시정지 (P)</button></div>
+<div id="menu"></div>
+<canvas id="gameCanvas" width="800" height="600"></canvas>
+<div id="help">
+  <p><b>규칙</b> 보스(😈)가 만드는 붉은 장판을 피해 50초를 버티면 <b>성공</b>, 체력(❤️ 3개)이 모두 닳으면 <b>실패</b>입니다.</p>
+  <p>붉은 경고 모양이 차오르면 곧 폭발합니다. 맞으면 체력이 1 줄고 1초간 무적이 됩니다. 초록 원이 보이면 그 안이 안전지대입니다.</p>
+  <p><b>조작</b> 이동: <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> 또는 방향키 (🤺가 움직이고, 키 입력 한 건마다 '이동 입력'이 1회 늘어납니다) · 일시정지: <kbd>P</kbd> 또는 <kbd>Esc</kbd>, 버튼</p>
+  <p><b>어려움</b> 마지막 10초에는 'Danger!' 발악 패턴이 나옵니다.</p>
+</div>
 
-  <canvas id="gameCanvas" width="800" height="600"></canvas>
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const menuEl = document.getElementById('menu');
+const statusEl = document.getElementById('status');
+const pauseBtn = document.getElementById('pauseBtn');
+const barEl = document.getElementById('bar');
+const helpEl = document.getElementById('help');
+const W = canvas.width, H = canvas.height, TAU = Math.PI * 2;
 
-  <script>
-    const canvas = document.getElementById('gameCanvas');
-    const ctx = canvas.getContext('2d');
+const ACCEL = 4, FRICTION = 0.7;                      // 이동 가속도 / 마찰
+const SPAWN_INTERVAL = 2500;                          // 일반 장판 생성 간격(ms)
+const STEPS = [100, 200, 300];                        // 순차 안전지대 반지름
+const PATTERNS = ['homing', 'fullscreen', 'chain'];   // 발악 패턴
+const HOMING_MAX = 2, HOMING_LIFE = 2000;             // 유도 구체: 최대 개수 / 수명(ms)
+const ZONE_TIMES = {                                  // [경고 시간, 폭발 시간] ms
+  cross: [1200, 300], outerSafe: [1500, 300], innerSafe: [1500, 300],
+  sequenceSafe: [800, 200], complex: [1500, 300],
+};
 
-    // --- 게임 상태 변수 ---
-    let gameState = 'playing'; 
-    let startTime = Date.now();
-    const GAME_DURATION = 50000; 
+const boss = { x: W / 2, y: H / 2, size: 50, radius: 25 };
+const player = { x: 0, y: 0, size: 40, radius: 20, vx: 0, vy: 0, bounceX: 0, bounceY: 0, hp: 3, invincible: 0 };
 
-    const boss = {
-      x: canvas.width / 2,
-      y: canvas.height / 2,
-      size: 50,
-      emoji: '😈',
-      radius: 25
-    };
+let phase = 'ready';                 // ready(대기) | playing(진행 중) | won(성공) | lost(실패)
+let mode = null, duration, hard, dead, moves = 0;
+let raf = 0, last = 0, acc = 0, gameTime = 0;   // 게임 시계 (실제 시간이 아니라 진행된 시간)
+let paused = false, away = false;               // 일시정지(직접) / 창 포커스 이탈(자동)
+let zones = [], homing = [];
+let lastSpawn = 0, lastType = null;
+let enraged = false, pattern = null, bag = [], patternTime = 0, cooldown = 0;
 
-    const player = {
-      x: canvas.width / 2,
-      y: canvas.height - 100,
-      size: 40,
-      radius: 20,
-      emoji: '🤺',
-      speed: 30,
-      vx: 0, 
-      vy: 0,
-      bounceX: 0, 
-      bounceY: 0,
-      // 3번 수정: 가속도를 더 높이고 마찰을 줄여서 빠릿하게!
-      acceleration: 2.0, 
-      friction: 0.5,
-      hp: 3,           
-      maxHp: 3,
-      invincible: 0    
-    };
+/* ── 입력 ── */
+const down = new Set();     // 지금 눌려 있는 키
+const tapped = new Set();   // 다음 한 스텝 안에 눌렸다 뗀 키 (아주 짧게 눌러도 이동에 반영되게)
+const MOVE_KEYS = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (e.key.startsWith('Arrow')) e.preventDefault();
+  if ((k === 'p' || k === 'escape') && !e.repeat) return setPaused(!paused);
+  if (phase !== 'playing' || paused || away) return;       // 멈춘 동안의 입력은 무시
+  down.add(k);
+  tapped.add(k);
+  if (MOVE_KEYS.has(k)) { moves++; renderStatus(); }       // 키 입력 이벤트 한 건 = 이동 입력 1회
+});
+addEventListener('keyup', e => down.delete(e.key.toLowerCase()));
+const key = (...names) => names.some(k => down.has(k) || tapped.has(k)) ? 1 : 0;
 
-    let zones = [];
-    let lastZoneTime = 0;
-    const ZONE_SPAWN_INTERVAL = 1000; 
+/* ── 화면 상태 표시 ── */
+const LABEL = { ready: '대기 중', playing: '진행 중', paused: '일시정지', won: '성공', lost: '실패' };
+const MODE_TEXT = { normal: '보통', hard: '어려움' };
+const timeLeft = () => Math.max(0, Math.floor((duration - gameTime) / 1000));
 
-    const keys = {
-      w: false, a: false, s: false, d: false,
-      ArrowUp: false, ArrowLeft: false, ArrowDown: false, ArrowRight: false
-    };
+function renderStatus() {
+  const shown = phase === 'playing' && (paused || away) ? 'paused' : phase;
+  const parts = [`상태: ${LABEL[shown]}${shown === 'paused' && !paused ? ' (창 포커스 없음)' : ''}`, `난이도: ${MODE_TEXT[mode] || '-'}`];
+  if (mode) parts.push(`체력: ${'❤️'.repeat(player.hp)}`, `남은 시간: ${timeLeft()}초`);
+  parts.push(`이동 입력: ${moves}회`);
+  const text = parts.join(' · ');
+  if (statusEl.textContent !== text) statusEl.textContent = text;
+  Object.assign(statusEl.dataset, { phase: shown, hp: player.hp, timeLeft: mode ? timeLeft() : '', moves, x: Math.round(player.x), y: Math.round(player.y) });
+  const label = paused ? '재개 (P)' : '일시정지 (P)';
+  if (pauseBtn.textContent !== label) pauseBtn.textContent = label;
+  pauseBtn.style.visibility = phase === 'playing' ? 'visible' : 'hidden';
+}
 
-    window.addEventListener('keydown', (e) => {
-      if (e.key in keys) e.preventDefault(); 
-      if (e.key === 'w' || e.key === 'W') keys.w = true;
-      if (e.key === 'a' || e.key === 'A') keys.a = true;
-      if (e.key === 's' || e.key === 'S') keys.s = true;
-      if (e.key === 'd' || e.key === 'D') keys.d = true;
-      if (e.key === 'ArrowUp') keys.ArrowUp = true;
-      if (e.key === 'ArrowLeft') keys.ArrowLeft = true;
-      if (e.key === 'ArrowDown') keys.ArrowDown = true;
-      if (e.key === 'ArrowRight') keys.ArrowRight = true;
-    });
+/* ── 일시정지 / 포커스 이탈: 멈춘 동안 게임 시간이 흐르지 않고, 돌아오면 기준 시각을 새로 잡아 이어감 ── */
+function resetClock() { down.clear(); tapped.clear(); acc = 0; last = 0; }   // 눌려 있던 키 기록도 비움 (이탈 중 놓친 keyup 대비)
+function setPaused(v) {
+  if (phase !== 'playing' || paused === v) return;
+  paused = v;
+  resetClock();
+  renderStatus();
+}
+function setAway(v) {
+  if (away === v) return;
+  away = v;
+  resetClock();
+  renderStatus();
+}
+addEventListener('blur', () => setAway(true));
+addEventListener('focus', () => setAway(document.hidden));
+document.addEventListener('visibilitychange', () => setAway(document.hidden));
+pauseBtn.addEventListener('click', () => setPaused(!paused));
 
-    window.addEventListener('keyup', (e) => {
-      if (e.key === 'w' || e.key === 'W') keys.w = false;
-      if (e.key === 'a' || e.key === 'A') keys.a = false;
-      if (e.key === 's' || e.key === 'S') keys.s = false;
-      if (e.key === 'd' || e.key === 'D') keys.d = false;
-      if (e.key === 'ArrowUp') keys.ArrowUp = false;
-      if (e.key === 'ArrowLeft') keys.ArrowLeft = false;
-      if (e.key === 'ArrowDown') keys.ArrowDown = false;
-      if (e.key === 'ArrowRight') keys.ArrowRight = false;
-    });
+/* ── 화면 크기에 맞춰 캔버스 크기 계산 (게임 상태와는 무관) ── */
+function fit() {
+  const used = barEl.offsetHeight + helpEl.offsetHeight + 24 + 16 + 8;   // 위·아래 여백 + 간격 + 테두리
+  document.documentElement.style.setProperty('--canvas-h', Math.max(160, innerHeight - used) + 'px');
+}
+addEventListener('resize', fit);
+new ResizeObserver(fit).observe(barEl);
+new ResizeObserver(fit).observe(helpEl);
 
-    function draw() {
-      // 1번 수정: 캔버스 전체를 완벽하게 지움
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+/* ── 메뉴 (시작/성공/실패 화면 공용) ── */
+function showMenu(title, text, ended) {
+  const buttons = ended
+    ? `<button data-action="restart">다시 시작 (${MODE_TEXT[mode]})</button>
+       <button data-action="menu">난이도 선택으로</button>`
+    : `<button data-mode="normal">보통 난이도 (50초)</button>
+       <button data-mode="hard" class="hard-btn">어려움 난이도 (50초 + 발악 패턴)</button>`;
+  menuEl.innerHTML = `<h1>${title}</h1><p>${text}</p>${buttons}`;
+  menuEl.style.display = '';
+  canvas.style.display = 'none';
+}
+menuEl.addEventListener('click', e => {
+  const { mode: m, action } = e.target.dataset;
+  if (m) startGame(m);
+  else if (action === 'restart') startGame(mode);
+  else if (action === 'menu') goReady();
+});
 
-      let elapsed = Date.now() - startTime;
-      let timeLeft = Math.max(0, Math.floor((GAME_DURATION - elapsed) / 1000));
+function goReady() {
+  cancelAnimationFrame(raf);
+  phase = 'ready';
+  mode = null;
+  moves = 0;
+  paused = away = false;
+  renderStatus();
+  showMenu('보스 피하기', '난이도를 선택해주세요.');
+}
 
-      // 장판 그리기
-      zones.forEach(zone => {
-        if (zone.state === 'warning') {
-          ctx.beginPath();
-          ctx.arc(zone.x, zone.y, zone.radius, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
-          ctx.fill();
-          ctx.strokeStyle = 'red';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        } else if (zone.state === 'exploding') {
-          ctx.beginPath();
-          ctx.arc(zone.x, zone.y, zone.radius, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
-          ctx.fill();
-        }
-      });
+function endGame(won) {
+  cancelAnimationFrame(raf);
+  paused = away = false;
+  phase = won ? 'won' : 'lost';
+  renderStatus();
+  showMenu(won ? '성공!' : '실패...',
+           won ? `보스의 힘이 소진되었습니다. 남은 체력: ${'❤️'.repeat(player.hp)}` : '체력이 다했습니다.', true);
+}
 
-      // 보스 그리기
-      ctx.font = `${boss.size}px serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      // 1번 수정: 보스는 항상 또렷하게 그려줌 (번쩍임 없음)
-      ctx.fillText(boss.emoji, boss.x, boss.y);
+function startGame(m) {
+  cancelAnimationFrame(raf);
+  mode = m;
+  hard = m === 'hard';
+  duration = 50000;
+  phase = 'playing';
+  dead = false;
+  moves = 0;
+  paused = away = false;
+  gameTime = 0;
+  resetClock();
+  menuEl.style.display = 'none';
+  canvas.style.display = 'block';
 
-      // 유저 그리기 (1번 수정: 깜빡일 때 아예 안 그리는 게 아니라 '반투명'하게 그려서 가시성 확보)
-      if (player.invincible > 0 && Math.floor(Date.now() / 100) % 2 === 0) {
-        ctx.globalAlpha = 0.3; // 투명도 30%로 설정
-      } else {
-        ctx.globalAlpha = 1.0; // 원래대로
+  // 한 판의 상태를 모두 처음 값으로 되돌림
+  Object.assign(player, { x: W / 2, y: H - 100, vx: 0, vy: 0, bounceX: 0, bounceY: 0, hp: 3, invincible: 0 });
+  zones = [];
+  homing = [];
+  lastSpawn = -Infinity;     // 시작하자마자 첫 장판이 나오도록
+  lastType = null;
+  enraged = false;
+  pattern = null;
+  bag = [];
+  patternTime = cooldown = 0;
+  renderStatus();
+  raf = requestAnimationFrame(frame);
+}
+
+/* ── 장판 ── */
+const newZone = (type, warningDuration, explodeDuration, extra = {}) =>
+  ({ type, state: 'warning', timer: 0, warningDuration, explodeDuration, progress: 0, ...extra });
+
+// 십자 장판의 각도 (회전형은 경고 동안 45°까지 돌아감)
+const crossAngle = (z, p = 1) => z.startAngle + (z.isRotating ? p * Math.PI / 4 : 0);
+
+function spawnZone() {
+  const r = Math.random();
+  let type;
+  if (lastType === 'outerSafe') type = r < 0.8 ? 'cross' : 'innerSafe';
+  else if (lastType === 'innerSafe') type = r < 0.8 ? 'cross' : 'outerSafe';
+  else type = r < 0.25 ? 'cross' : r < 0.5 ? 'outerSafe' : r < 0.75 ? 'innerSafe' : r < 0.85 ? 'sequenceSafe' : 'complex';
+  lastType = type;
+
+  let extra = {};
+  if (type === 'cross') extra = { isRotating: Math.random() < 0.5, startAngle: Math.PI / 4 * Math.floor(Math.random() * 4) };
+  if (type === 'sequenceSafe') extra = { step: 0, stepTimer: 0 };
+  zones.push(newZone(type, ...ZONE_TIMES[type], extra));
+}
+
+// 장판 상태 갱신. 끝난 장판은 false를 반환해 제거
+function updateZone(z) {
+  z.timer += 16;
+  if (z.type === 'sequenceSafe') {
+    z.stepTimer += 16;
+    if (z.state === 'warning' && z.stepTimer > z.warningDuration) {
+      z.state = 'exploding';
+      z.stepTimer = 0;
+      checkHit(z);
+    } else if (z.state === 'exploding' && z.stepTimer > z.explodeDuration) {
+      z.step++;
+      z.state = 'warning';
+      z.stepTimer = 0;
+      return z.step < STEPS.length;
+    }
+  } else if (z.state === 'warning') {
+    z.progress = z.timer / z.warningDuration;
+    if (z.progress >= 1) {
+      z.state = 'exploding';
+      z.timer = 0;
+      checkHit(z);
+    }
+  } else if (z.timer > z.explodeDuration) {
+    return false;
+  }
+  return true;
+}
+
+function hurt() {
+  if (player.invincible > 0) return;
+  player.hp--;
+  player.invincible = 1000;
+  if (player.hp <= 0) dead = true;
+}
+
+// 폭발하는 순간 플레이어가 맞았는지 판정
+function checkHit(z) {
+  const dx = player.x - boss.x, dy = player.y - boss.y;
+  const d = Math.hypot(dx, dy), r = player.radius;
+  let hit = false;
+
+  if (z.type === 'cross') {
+    const a = -crossAngle(z);
+    const rx = dx * Math.cos(a) - dy * Math.sin(a);
+    const ry = dx * Math.sin(a) + dy * Math.cos(a);
+    const arm = (across, along) => Math.abs(across) < 30 + r && Math.abs(along) < 500 + r;
+    hit = arm(rx, ry) || arm(ry, rx);
+  } else if (z.type === 'outerSafe') {
+    hit = d < 250 + r;
+  } else if (z.type === 'innerSafe') {
+    hit = d > 130 - r;
+  } else if (z.type === 'sequenceSafe') {
+    const inner = z.step ? STEPS[z.step - 1] : 0, outer = STEPS[z.step];
+    hit = d > inner - r && d < outer + r;
+  } else { // complex
+    const angle = (Math.atan2(dy, dx) + TAU) % TAU;
+    const inSector = [1, 3, 5, 7].some(k => Math.abs(angle - k * Math.PI / 4) < Math.PI / 8);
+    hit = d < 40 + r || (d > 120 - r && d < 200 + r) || (inSector && d < 500 + r);
+  }
+  if (hit) hurt();
+}
+
+/* ── 발악 패턴 (어려움, 40초 이후 마지막 10초) ── */
+// 3종을 섞어서 한 번씩 차례로 내고, 다 나오면 다시 섞음 (바뀌는 순간 직전 패턴과 같은 것은 피함)
+function nextPattern() {
+  if (!bag.length) {
+    bag = [...PATTERNS];
+    for (let i = bag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+    if (bag[0] === pattern) bag.push(bag.shift());
+  }
+  return bag.shift();
+}
+
+function runEnrage() {
+  patternTime += 16;
+  cooldown -= 16;
+
+  if (!pattern || patternTime > 3000) {            // 3초마다 다음 패턴으로 교체
+    pattern = nextPattern();
+    patternTime = cooldown = 0;
+  }
+
+  if (cooldown <= 0) {
+    if (pattern === 'homing') {                    // 플레이어를 쫓는 구체 (최대 3개)
+      if (homing.length < HOMING_MAX) homing.push({ x: boss.x, y: boss.y, radius: 30, timer: 0 });
+      cooldown = 1000;
+    } else {
+      if (!zones.length) {
+        zones.push(pattern === 'fullscreen'
+          ? newZone('outerSafe', 800, 200)
+          : newZone('cross', 500, 200, { isRotating: true, startAngle: 0 }));
       }
-      ctx.font = `${player.size}px serif`;
-      ctx.fillText(player.emoji, player.x, player.y);
-      ctx.globalAlpha = 1.0; // 다시 원래 투명도로 복구
+      cooldown = pattern === 'fullscreen' ? 1500 : 2000;
+    }
+  }
 
-      // UI
-      ctx.font = '20px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillStyle = 'white';
-      ctx.fillText(`HP: ${'❤️'.repeat(player.hp)}`, 20, 30);
-      ctx.textAlign = 'right';
-      ctx.fillText(`남은 시간: ${timeLeft}초`, canvas.width - 20, 30);
+  homing = homing.filter(h => {
+    h.timer += 16;
+    const dx = player.x - h.x;
+    const dy = player.y - h.y;
+    const d = Math.hypot(dx, dy);
+    if (d > 0) { h.x += dx / d * 2.5; h.y += dy / d * 2.5; }
+    if (h.timer <= HOMING_LIFE) return true;
+    if (Math.hypot(player.x - h.x, player.y - h.y) < h.radius + player.radius) hurt();   // 수명이 다하면 폭발
+    return false;
+  });
+}
+
+/* ── 플레이어 이동 ── */
+function movePlayer() {
+  let mx = key('d', 'arrowright') - key('a', 'arrowleft');
+  let my = key('s', 'arrowdown') - key('w', 'arrowup');
+  if (mx && my) { mx *= 0.707; my *= 0.707; }
+
+  player.vx = (player.vx + mx * ACCEL) * FRICTION;
+  player.vy = (player.vy + my * ACCEL) * FRICTION;
+  if (Math.abs(player.vx) < 0.1) player.vx = 0;
+  if (Math.abs(player.vy) < 0.1) player.vy = 0;
+  player.bounceX *= 0.9;
+  player.bounceY *= 0.9;
+
+  let nx = player.x + player.vx + player.bounceX;
+  let ny = player.y + player.vy + player.bounceY;
+
+  // 보스와 부딪히면 밀려남
+  const dx = nx - boss.x, dy = ny - boss.y, min = player.radius + boss.radius;
+  if (Math.hypot(dx, dy) < min) {
+    const a = Math.atan2(dy, dx);
+    nx = boss.x + Math.cos(a) * min;
+    ny = boss.y + Math.sin(a) * min;
+    player.bounceX = Math.cos(a) * 7;
+    player.bounceY = Math.sin(a) * 7;
+    player.vx *= 0.5;
+    player.vy *= 0.5;
+  }
+
+  // 벽에 닿으면 멈춤
+  const half = player.size / 2;
+  player.x = nx;
+  player.y = ny;
+  if (nx < half || nx > W - half) { player.x = Math.min(Math.max(nx, half), W - half); player.vx = player.bounceX = 0; }
+  if (ny < half || ny > H - half) { player.y = Math.min(Math.max(ny, half), H - half); player.vy = player.bounceY = 0; }
+}
+
+/* ── 그리기 ── */
+const red = a => `rgba(255,0,0,${a})`;
+
+function drawZone(z) {
+  const warn = z.state === 'warning';
+  const p = warn ? z.progress : 1;                 // 폭발 상태는 완전히 채워진 모양
+  ctx.fillStyle = red(warn ? 0.4 : 0.8);
+  ctx.strokeStyle = red(0.5);
+  ctx.lineWidth = 2;
+
+  const circle = (r, ccw) => ctx.arc(boss.x, boss.y, r, 0, TAU, ccw);
+  const paint = outline => { ctx.fill(); if (warn && outline) ctx.stroke(); };
+  const ring = (inner, outer, outline) => { ctx.beginPath(); circle(outer); circle(inner, true); paint(outline); };
+
+  if (z.type === 'cross') {
+    const arms = len => [[-30, -len, 60, len], [-30, 0, 60, len], [-len, -30, len, 60], [0, -30, len, 60]];
+    ctx.save();
+    ctx.translate(boss.x, boss.y);
+    ctx.rotate(crossAngle(z, p));
+    if (warn) arms(500).forEach(a => ctx.strokeRect(...a));
+    arms(500 * p).forEach(a => ctx.fillRect(...a));
+    ctx.restore();
+
+  } else if (z.type === 'outerSafe') {
+    if (warn) { ctx.lineWidth = 3; ctx.beginPath(); circle(250); ctx.stroke(); }
+    ctx.beginPath(); circle(250 * p); ctx.fill();
+
+  } else if (z.type === 'innerSafe') {
+    const far = Math.hypot(W / 2, H / 2);          // 화면 모서리까지의 거리
+    ctx.beginPath();
+    ctx.rect(0, 0, W, H);
+    circle(warn ? far - (far - 130) * p : 130, true);   // 안전지대만 구멍으로 남김
+    ctx.fill();
+    ctx.strokeStyle = 'rgb(0,255,0)';
+    ctx.lineWidth = 4;
+    ctx.beginPath(); circle(130); ctx.stroke();
+
+  } else if (z.type === 'sequenceSafe') {
+    if (warn) STEPS.forEach(r => { ctx.beginPath(); circle(r); ctx.stroke(); });
+    if (z.step < STEPS.length) {
+      const inner = z.step ? STEPS[z.step - 1] : 0, outer = STEPS[z.step];
+      ring(inner, inner + (outer - inner) * (warn ? z.stepTimer / z.warningDuration : 1));
     }
 
-    function update() {
-      if (gameState !== 'playing') return;
-
-      let elapsed = Date.now() - startTime;
-      if (elapsed >= GAME_DURATION) {
-        gameState = 'win';
-        return;
-      }
-
-      let now = Date.now();
-      if (now - lastZoneTime > ZONE_SPAWN_INTERVAL) {
-        lastZoneTime = now;
-        let angle = Math.random() * Math.PI * 2;
-        let distance = 100 + Math.random() * 250; 
-        let zx = boss.x + Math.cos(angle) * distance;
-        let zy = boss.y + Math.sin(angle) * distance;
-        
-        let radius = 60; 
-        zx = Math.max(radius, Math.min(canvas.width - radius, zx));
-        zy = Math.max(radius, Math.min(canvas.height - radius, zy));
-
-        zones.push({
-          x: zx,
-          y: zy,
-          radius: radius,
-          state: 'warning', 
-          timer: 0,
-          warningDuration: 800, 
-          explodeDuration: 300  
-        });
-      }
-
-      zones.forEach((zone, index) => {
-        zone.timer += 16; 
-        if (zone.state === 'warning' && zone.timer > zone.warningDuration) {
-          zone.state = 'exploding';
-          zone.timer = 0;
-          let dx = player.x - zone.x;
-          let dy = player.y - zone.y;
-          let dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < zone.radius + player.radius && player.invincible <= 0) {
-            player.hp -= 1;
-            player.invincible = 1000; 
-            if (player.hp <= 0) gameState = 'lose';
-          }
-        } else if (zone.state === 'exploding' && zone.timer > zone.explodeDuration) {
-          zones.splice(index, 1); 
-        }
-      });
-
-      if (player.invincible > 0) player.invincible -= 16;
-
-      let moveX = 0;
-      let moveY = 0;
-      if (keys.w || keys.ArrowUp) moveY -= 1;
-      if (keys.s || keys.ArrowDown) moveY += 1;
-      if (keys.a || keys.ArrowLeft) moveX -= 1;
-      if (keys.d || keys.ArrowRight) moveX += 1;
-
-      if (moveX !== 0 && moveY !== 0) { moveX *= 0.707; moveY *= 0.707; }
-
-      // 3번 수정: 가속도와 마찰이 적용된 이동
-      player.vx += moveX * player.acceleration;
-      player.vy += moveY * player.acceleration;
-      player.vx *= player.friction;
-      player.vy *= player.friction;
-
-      if (Math.abs(player.vx) < 0.1) player.vx = 0;
-      if (Math.abs(player.vy) < 0.1) player.vy = 0;
-      
-      if (player.vx > player.speed) player.vx = player.speed;
-      if (player.vx < -player.speed) player.vx = -player.speed;
-      if (player.vy > player.speed) player.vy = player.speed;
-      if (player.vy < -player.speed) player.vy = -player.speed;
-
-      player.bounceX *= 0.9;
-      player.bounceY *= 0.9;
-
-      let nextX = player.x + player.vx + player.bounceX;
-      let nextY = player.y + player.vy + player.bounceY;
-
-      let dx = nextX - boss.x;
-      let dy = nextY - boss.y;
-      let dist = Math.sqrt(dx * dx + dy * dy);
-      let minDist = player.radius + boss.radius;
-      if (dist < minDist) {
-        let angle = Math.atan2(dy, dx);
-        nextX = boss.x + Math.cos(angle) * minDist;
-        nextY = boss.y + Math.sin(angle) * minDist;
-        player.bounceX = Math.cos(angle) * 7;
-        player.bounceY = Math.sin(angle) * 7;
-        player.vx *= 0.5;
-        player.vy *= 0.5;
-      }
-
-      player.x = nextX;
-      player.y = nextY;
-
-      if (player.x < player.size / 2) { player.x = player.size / 2; player.vx = 0; player.bounceX = 0; }
-      if (player.x > canvas.width - player.size / 2) { player.x = canvas.width - player.size / 2; player.vx = 0; player.bounceX = 0; }
-      if (player.y < player.size / 2) { player.y = player.size / 2; player.vy = 0; player.bounceY = 0; }
-      if (player.y > canvas.height - player.size / 2) { player.y = canvas.height - player.size / 2; player.vy = 0; player.bounceY = 0; }
-
-      draw();
-      
-      if (gameState === 'playing') {
-        requestAnimationFrame(update);
-      } else if (gameState === 'win') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = 'gold';
-        ctx.font = '50px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('승리! 보스가 과부하되었습니다.', canvas.width / 2, canvas.height / 2);
-      } else if (gameState === 'lose') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = 'red';
-        ctx.font = '50px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('패배... 체력이 다했습니다.', canvas.width / 2, canvas.height / 2);
-      }
+  } else { // complex: 중앙 원 + 고리 + 4방향 부채꼴
+    ctx.beginPath(); circle(40 * p); paint(true);
+    if (p > 0) ring(120, 120 + 80 * p, true);
+    ctx.save();
+    ctx.translate(boss.x, boss.y);
+    for (let i = 0; i < 4; i++) {
+      ctx.save();
+      ctx.rotate(Math.PI / 2 * i + Math.PI / 4);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, 500 * p, -Math.PI / 8, Math.PI / 8);
+      ctx.closePath();
+      paint(true);
+      ctx.restore();
     }
+    ctx.restore();
+  }
+}
 
-    update();
-  </script>
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  zones.forEach(drawZone);
+
+  homing.forEach(h => {
+    ctx.beginPath();
+    ctx.arc(h.x, h.y, h.radius, 0, TAU);
+    ctx.fillStyle = red(0.6);
+    ctx.fill();
+    ctx.strokeStyle = 'rgb(255,100,100)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  });
+
+  ctx.fillStyle = 'white';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${boss.size}px serif`;
+  ctx.fillText('😈', boss.x, boss.y);
+  ctx.globalAlpha = player.invincible > 0 ? 0.4 : 1;   // 무적 중에는 반투명
+  ctx.font = `${player.size}px serif`;
+  ctx.fillText('🤺', player.x, player.y);
+  ctx.globalAlpha = 1;
+
+  ctx.font = '20px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(`HP: ${'❤️'.repeat(player.hp)}`, 20, 30);
+  ctx.textAlign = 'right';
+  ctx.fillText(`남은 시간: ${Math.max(0, timeLeft())}초`, W - 20, 30);
+
+  if (enraged) {
+    ctx.font = '30px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'red';
+    ctx.fillText('Danger!', W / 2, 70);
+  }
+
+  if (paused || away) {                                // 멈춤 안내
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'white';
+    ctx.textAlign = 'center';
+    ctx.font = '40px sans-serif';
+    ctx.fillText(paused ? '일시정지' : '창 포커스 없음', W / 2, H / 2 - 20);
+    ctx.font = '20px sans-serif';
+    ctx.fillText(paused ? 'P 키 또는 버튼으로 재개' : '창으로 돌아오면 이어집니다', W / 2, H / 2 + 25);
+  }
+}
+
+/* ── 게임 루프: 16ms 단위로 진행 (모니터 주사율과 무관), 멈춘 동안에는 시간이 흐르지 않음 ── */
+const STEP = 16;
+
+function frame(ts) {
+  raf = requestAnimationFrame(frame);
+  const dt = last ? Math.min(ts - last, 100) : 0;     // 오래 멈췄다 와도 시간이 한꺼번에 튀지 않게 상한
+  last = ts;
+  if (!paused && !away) {
+    acc += dt;
+    while (acc >= STEP && phase === 'playing') { acc -= STEP; step(); }
+  }
+  if (phase === 'playing') { draw(); renderStatus(); }
+}
+
+function step() {
+  gameTime += STEP;
+  if (gameTime >= duration) return endGame(true);
+
+  if (hard && gameTime >= 40000) enraged = true;
+  if (enraged) {
+    runEnrage();
+  } else if (gameTime - lastSpawn > SPAWN_INTERVAL) {
+    lastSpawn = gameTime;
+    spawnZone();
+  }
+
+  zones = zones.filter(updateZone);
+  if (player.invincible > 0) player.invincible -= STEP;
+  movePlayer();
+  tapped.clear();
+  if (dead) endGame(false);
+}
+
+fit();
+goReady();
+</script>
 </body>
 </html>
